@@ -196,28 +196,36 @@ class LDAPAuthHandler(AuthHandler):
                 return
 
             ctx['action'] = 'initializing LDAP connection'
-            ldap_obj = ldap.initialize(ctx['url']);
+            #ldap.set_option(ldap.OPT_DEBUG_LEVEL, 4095)
+            ctx['url'] = ctx['url'].split(',')
+            for address in ctx['url']:
+                self.log_message('Try to connect to "%s"' % (address))
+                try:
+                    ldap_obj = ldap.initialize(address)
+                    # Python-ldap module documentation advises to always
+                    # explicitely set the LDAP version to use after running
+                    # initialize() and recommends using LDAPv3. (LDAPv2 is
+                    # deprecated since 2003 as per RFC3494)
+                    #
+                    # Also, the STARTTLS extension requires the
+                    # use of LDAPv3 (RFC2830).
+                    ldap_obj.protocol_version=ldap.VERSION3
 
-            # Python-ldap module documentation advises to always
-            # explicitely set the LDAP version to use after running
-            # initialize() and recommends using LDAPv3. (LDAPv2 is
-            # deprecated since 2003 as per RFC3494)
-            #
-            # Also, the STARTTLS extension requires the
-            # use of LDAPv3 (RFC2830).
-            ldap_obj.protocol_version=ldap.VERSION3
+                    # Establish a STARTTLS connection if required by the
+                    # headers.
+                    if ctx['starttls'] == 'true':
+                        ldap_obj.start_tls_s()
 
-            # Establish a STARTTLS connection if required by the
-            # headers.
-            if ctx['starttls'] == 'true':
-                ldap_obj.start_tls_s()
+                    # See https://www.python-ldap.org/en/latest/faq.html
+                    if ctx['disable_referrals'] == 'true':
+                        ldap_obj.set_option(ldap.OPT_REFERRALS, 0)
 
-            # See https://www.python-ldap.org/en/latest/faq.html
-            if ctx['disable_referrals'] == 'true':
-                ldap_obj.set_option(ldap.OPT_REFERRALS, 0)
-
-            ctx['action'] = 'binding as search user'
-            ldap_obj.bind_s(ctx['binddn'], ctx['bindpasswd'], ldap.AUTH_SIMPLE)
+                    ctx['action'] = 'binding as search user'
+                    ldap_obj.bind_s(ctx['binddn'], ctx['bindpasswd'], ldap.AUTH_SIMPLE)
+                    break
+                except :
+                    self.log_message('Failed to connect to "%s", try next' % (address))
+                    pass
 
             ctx['action'] = 'preparing search filter'
             searchfilter = ctx['template'] % { 'username': ctx['user'] }
@@ -259,10 +267,15 @@ class LDAPAuthHandler(AuthHandler):
 
             self.log_message('Auth OK for user "%s"' % (ctx['user']))
 
+            ctx['action'] = 'binding as search user'
+
+            ldap_obj.bind_s(ctx['binddn'], ctx['bindpasswd'], ldap.AUTH_SIMPLE)
+
             if ctx['grouplimit'] and ctx['groupbasedn']:
                 groupsearchfilter = ctx['grouptemplate'] % { 'groupname': ctx['grouplimit'] }
                 groupResults = ldap_obj.search_s(ctx['groupbasedn'], ldap.SCOPE_SUBTREE,
                                           groupsearchfilter, ["memberUid"])
+                print(groupsearchfilter)
                 if len(groupResults) > 0:
                     for dn, entry in groupResults:
                         if ctx['user'] in entry.get('memberUid'):
@@ -273,6 +286,10 @@ class LDAPAuthHandler(AuthHandler):
                                 (ctx['user'], ctx['grouplimit']))
                             self.auth_failed(ctx)
                             return
+                else:
+                    self.log_message(('Group "%s" has 0 members') % (ctx['grouplimit']))
+                    self.auth_failed(ctx)
+                    return
 
             # Successfully authenticated user
             self.send_response(200)
